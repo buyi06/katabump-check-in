@@ -6,7 +6,6 @@ from DrissionPage import ChromiumPage, ChromiumOptions
 def handle_cloudflare(page, retries=5):
     """
     增强版 Cloudflare 处理逻辑
-    :param retries: 尝试次数
     """
     print(f"--- [安全检查] 正在扫描 Cloudflare 盾 ({retries}次尝试)... ---")
     for i in range(retries):
@@ -41,8 +40,6 @@ def handle_cloudflare(page, retries=5):
 def find_element_robust(page, selectors, timeout=15):
     """
     多重保障查找元素
-    :param selectors: 一个包含多种查找方式的列表 [('text', 'Login'), ('css', '.btn')]
-    :param timeout: 超时时间
     """
     start_time = time.time()
     while time.time() - start_time < timeout:
@@ -55,7 +52,7 @@ def find_element_robust(page, selectors, timeout=15):
                 elif method == 'raw':
                     ele = page.ele(value)
                 
-                if ele and ele.is_displayed(): # 必须是可见的
+                if ele and ele.is_displayed():
                     return ele
             except:
                 pass
@@ -63,19 +60,28 @@ def find_element_robust(page, selectors, timeout=15):
     return None
 
 def job():
-    # --- 1. 浏览器初始化 (配置优化) ---
+    # --- 1. 浏览器初始化 (针对 GitHub Actions 的核心修复) ---
     co = ChromiumOptions()
-    co.headless(True)
+    
+    # 【修复重点 1】使用新版无头模式 (报错提示要求的)
+    co.set_argument('--headless=new')
+    
+    # 【修复重点 2】解决 Linux 容器内存不足导致崩溃的问题 (至关重要)
+    co.set_argument('--disable-dev-shm-usage') 
+    
+    # 常规 Linux 必备参数
     co.set_argument('--no-sandbox')
     co.set_argument('--disable-gpu')
-    co.set_argument('--lang=zh-CN')
-    # 模拟最新的 Chrome，防止被识别为机器人
-    co.set_argument('--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36')
-    # 忽略证书错误
     co.set_argument('--ignore-certificate-errors')
     
+    # 模拟真实用户
+    co.set_argument('--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36')
+    
+    # 尝试自动寻找系统安装的 Chrome (GitHub Actions 环境通常在标准路径)
+    co.auto_port() 
+
     page = ChromiumPage(co)
-    # 设置全局超时，防止卡死
+    # 设置全局超时
     page.set.timeout(20)
     
     try:
@@ -85,7 +91,7 @@ def job():
         if not token:
             raise Exception("❌ 致命错误：Github Secrets 中未找到 DISCORD_TOKEN")
 
-        # 访问 Discord 之前先清空 Cookie，防止冲突
+        # 访问 Discord 之前先清空 Cookie
         page.get('https://discord.com/login', retry=3, timeout=15)
         page.clear_cookies()
         
@@ -102,29 +108,25 @@ def job():
         page.wait.load_start()
         time.sleep(5)
         
-        # 验证 Token 是否有效
         if page.ele('css:input[name="email"]'):
-            print("⚠️ 警告：Discord Token 可能已失效（页面仍显示登录框）。尝试继续，依靠后续步骤...")
+            print("⚠️ 警告：Discord Token 可能已失效。尝试继续...")
         else:
             print(">>> ✅ Discord Token 有效，已跳过密码输入。")
 
         # ==================== 步骤 2: 智能登录判断 ====================
         print(">>> [2/7] 前往 Katabump 面板...")
-        # 直接访问 Dashboard 首页，而不是 Login 页，看看是不是直接能进
         page.get('https://dashboard.katabump.com/', retry=3)
         page.wait.load_start()
         handle_cloudflare(page)
         
-        # 状态检测：如果 URL 包含 login，说明被踢到了登录页
         if "auth/login" in page.url:
             print(">>> 检测到未登录状态，开始寻找登录按钮...")
             
-            # 【核心防护】多重手段找按钮
             selectors = [
                 ('text', 'Login with Discord'),
                 ('text', 'Discord'),
-                ('css', 'a[href*="discord"]'), # 找包含 discord 链接的 a 标签
-                ('css', '.btn-primary') # 某些面板的主按钮就是登录
+                ('css', 'a[href*="discord"]'),
+                ('css', '.btn-primary')
             ]
             
             btn = find_element_robust(page, selectors, timeout=15)
@@ -133,10 +135,9 @@ def job():
                 print(f">>> ✅ 成功定位登录按钮 (文本: {btn.text})，点击中...")
                 btn.click()
             else:
-                # 最后的挣扎：打印页面源码的前 500 个字，看看是不是白屏
                 print(f"DEBUG: 页面源码预览: {page.html[:200]}")
                 page.get_screenshot(path='login_btn_missing_debug.jpg')
-                raise Exception("❌ 无法找到登录按钮，页面可能加载失败或被拦截")
+                raise Exception("❌ 无法找到登录按钮")
 
             print(">>> 跳转授权页...")
             time.sleep(5)
@@ -146,7 +147,6 @@ def job():
                 print(">>> [3/7] 处理授权...")
                 handle_cloudflare(page)
                 
-                # 查找授权按钮
                 auth_selectors = [
                     ('text', 'Authorize'),
                     ('text', '授权'),
@@ -174,7 +174,7 @@ def job():
         
         if not is_logged_in:
              page.get_screenshot(path='login_failed_final.jpg')
-             raise Exception("❌ 登录流程结束，但 URL 仍停留在登录页或外部页面")
+             raise Exception("❌ 登录流程结束，但 URL 仍停留在登录页")
 
         # ==================== 步骤 5: 直达服务器 ====================
         target_url = "https://dashboard.katabump.com/servers/edit?id=197288"
@@ -196,17 +196,14 @@ def job():
         main_renew = find_element_robust(page, renew_selectors, timeout=10)
         
         if main_renew:
-            # 滚动到元素可见，防止被底部栏遮挡
-            # page.scroll.to_see(main_renew) 
             main_renew.click()
             print(">>> ✅ 点击主 Renew 按钮，等待弹窗...")
             time.sleep(3)
             
             # ==================== 步骤 7: 弹窗终极验证 ====================
             print(">>> [7/7] 处理弹窗验证...")
-            handle_cloudflare(page) # 再次检查弹窗里的 CF
+            handle_cloudflare(page)
             
-            # 寻找弹窗容器
             try:
                 modal = page.ele('css:.modal-content')
                 if modal:
@@ -221,8 +218,7 @@ def job():
             except Exception as e:
                 print(f"❌ 弹窗处理异常: {e}")
         else:
-            print("⚠️ 未找到 Renew 按钮。")
-            print("可能原因：1. 服务器未到期不需要续期；2. 页面布局改变；3. 加载失败。")
+            print("⚠️ 未找到 Renew 按钮 (可能已续期或布局变更)。")
             page.get_screenshot(path='no_renew_btn.jpg')
 
     except Exception as e:

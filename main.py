@@ -1,46 +1,72 @@
 import os
 import time
 import json
+import requests
 from DrissionPage import ChromiumPage, ChromiumOptions
 
-def handle_cloudflare(page, retries=5):
+def download_silk_extension():
     """
-    增强版 Cloudflare 处理逻辑
+    自动下载 Silk - Privacy Pass Client 插件
     """
-    print(f"--- [安全检查] 正在扫描 Cloudflare 盾 ({retries}次尝试)... ---")
-    for i in range(retries):
+    extension_id = "ajhmfdgkijocedmfjonnpjfojldioehi"
+    crx_path = "silk.crx"
+    
+    # 如果文件已存在，跳过下载
+    if os.path.exists(crx_path):
+        return os.path.abspath(crx_path)
+        
+    print(">>> [系统] 正在下载 Silk 隐私插件...")
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+    }
+    # Google 官方插件下载接口
+    download_url = f"https://clients2.google.com/service/update2/crx?response=redirect&prodversion=122.0&acceptformat=crx2,crx3&x=id%3D{extension_id}%26uc"
+    
+    try:
+        resp = requests.get(download_url, headers=headers, stream=True)
+        if resp.status_code == 200:
+            with open(crx_path, 'wb') as f:
+                f.write(resp.content)
+            print(">>> [系统] 插件下载成功！")
+            return os.path.abspath(crx_path)
+        else:
+            print(f"⚠️ 插件下载失败，状态码: {resp.status_code}")
+            return None
+    except Exception as e:
+        print(f"⚠️ 插件下载出错: {e}")
+        return None
+
+def wait_for_cloudflare_auto_solve(page, timeout=20):
+    """
+    被动式过盾：完全依赖插件自动解决
+    """
+    print(f"--- [插件] 等待 Silk 插件自动过盾 (超时 {timeout}s)... ---")
+    start = time.time()
+    while time.time() - start < timeout:
+        title = page.title.lower()
+        html = page.html.lower()
+        
+        # 成功的标志：标题不再是 Just a moment，且页面没有 CF 验证框
+        if "just a moment" not in title and "cloudflare" not in title:
+            print("--- [插件] 检测到 Cloudflare 已消失！ ---")
+            return True
+        
+        # 如果插件没反应，尝试手动点一下 iframe 激活它
         try:
-            # 1. 检查标题和页面内容
-            title = page.title.lower()
-            html = page.html.lower()
-            
-            # 如果看起来像正常页面，直接放行
-            if "dashboard" in page.url and "just a moment" not in title:
-                return True
-            
-            # 2. 寻找 Cloudflare 的特征 iframe
             iframe = page.get_frame('@src^https://challenges.cloudflare.com')
             if iframe:
-                print(f"--- [防御] 发现验证框 (第 {i+1} 次)，尝试突破... ---")
-                time.sleep(2) # 等待 iframe 加载完全
-                iframe.ele('tag:body').click()
-                time.sleep(5) # 点击后多等一会
-                page.refresh() # 刷新页面看是否过盾
-                time.sleep(3)
-            else:
-                # 没有 iframe，可能是正在加载或者已经过了
-                if "just a moment" not in title and "verify" not in html:
-                    return True
-                time.sleep(2)
-        except Exception as e:
-            print(f"--- [警告] 过盾检测轻微异常: {e} ---")
-            time.sleep(1)
+                # 稍微点一下 body 唤醒插件
+                iframe.ele('tag:body').click(by_js=True)
+        except:
+            pass
+            
+        time.sleep(1)
+    
+    print("--- [警告] 插件自动过盾超时，尝试强制继续... ---")
     return False
 
 def find_element_robust(page, selectors, timeout=15):
-    """
-    多重保障查找元素
-    """
+    """多重保障查找元素"""
     start_time = time.time()
     while time.time() - start_time < timeout:
         for method, value in selectors:
@@ -51,7 +77,6 @@ def find_element_robust(page, selectors, timeout=15):
                     ele = page.ele(f'css:{value}')
                 elif method == 'raw':
                     ele = page.ele(value)
-                
                 if ele and ele.is_displayed():
                     return ele
             except:
@@ -60,46 +85,48 @@ def find_element_robust(page, selectors, timeout=15):
     return None
 
 def job():
-    # --- 1. 浏览器初始化 ---
-    co = ChromiumOptions()
+    # --- 1. 下载插件 ---
+    extension_path = download_silk_extension()
     
-    # 针对 GitHub Actions 环境的完整配置
+    # --- 2. 浏览器配置 ---
+    co = ChromiumOptions()
     co.set_argument('--headless=new')       
     co.set_argument('--disable-dev-shm-usage') 
     co.set_argument('--no-sandbox')
     co.set_argument('--disable-gpu')
     co.set_argument('--ignore-certificate-errors')
-    # 强制设置大窗口，防止按钮被折叠
     co.set_argument('--window-size=1920,1080')
     co.set_argument('--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36')
     
+    # 【核心】挂载插件
+    if extension_path:
+        co.add_extension(extension_path)
+    
     co.auto_port() 
-
     page = ChromiumPage(co)
     
-    # 【修复 1】设置超时的正确写法 (复数)
+    # 设置超时 (修正版写法)
     try:
         page.set.timeouts(20)
     except:
-        pass # 防止极少数版本差异导致的报错
-    
+        pass
+
     try:
-        # ==================== 步骤 1: 强力注入 Token ====================
+        # ==================== 步骤 1: 注入 Token ====================
         print(">>> [1/7] 初始化环境与 Token 注入...")
         token = os.environ.get("DISCORD_TOKEN")
         if not token:
             raise Exception("❌ 致命错误：Github Secrets 中未找到 DISCORD_TOKEN")
 
-        # 访问 Discord 之前先清空 Cookie
         page.get('https://discord.com/login', retry=3, timeout=15)
         
-        # 【修复 2】清除 Cookie 的正确写法 (适配 4.x)
         try:
             page.set.cookies.clear()
         except:
-            page.clear_cookies() # 兼容旧版本
+            page.clear_cookies()
         
-        handle_cloudflare(page)
+        # 等待插件处理 Discord 的盾
+        wait_for_cloudflare_auto_solve(page)
 
         # 注入 Token
         token_value = f'"{token}"'
@@ -107,67 +134,60 @@ def job():
         page.run_js(js_code)
         time.sleep(1)
         
-        print(">>> Token 注入完毕，正在验证有效性...")
+        print(">>> Token 注入完毕，刷新验证...")
         page.refresh()
         page.wait.load_start()
         time.sleep(5)
         
         if page.ele('css:input[name="email"]'):
-            # 如果注入后还是显示登录框，说明 Token 废了，后面也就不用跑了
-            page.get_screenshot(path='token_invalid.jpg')
-            raise Exception("❌ Discord Token 无效或已过期（仍显示登录框）。请重新提取 Token！")
+            page.get_screenshot(path='token_fail.jpg')
+            raise Exception("❌ Token 无效，Discord 仍要求登录")
         else:
-            print(">>> ✅ Discord Token 有效，已跳过密码输入。")
+            print(">>> ✅ Discord Token 有效。")
 
-        # ==================== 步骤 2: 智能登录判断 ====================
+        # ==================== 步骤 2: 前往面板 ====================
         print(">>> [2/7] 前往 Katabump 面板...")
         page.get('https://dashboard.katabump.com/', retry=3)
         page.wait.load_start()
-        handle_cloudflare(page)
         
+        # 等待插件处理 Katabump 的盾
+        wait_for_cloudflare_auto_solve(page)
+        
+        # 检查是否需要登录
         if "auth/login" in page.url:
-            print(">>> 检测到未登录状态，开始寻找登录按钮...")
-            
+            print(">>> 寻找登录按钮...")
             selectors = [
                 ('text', 'Login with Discord'),
-                ('text', 'Discord'),
                 ('css', 'a[href*="discord"]'),
                 ('css', '.btn-primary')
             ]
-            
             btn = find_element_robust(page, selectors, timeout=15)
             
             if btn:
-                print(f">>> ✅ 成功定位登录按钮 (文本: {btn.text})，点击中...")
+                print(">>> 点击登录...")
                 btn.click()
             else:
-                print(f"DEBUG: 页面源码预览: {page.html[:200]}")
-                page.get_screenshot(path='login_btn_missing_debug.jpg')
-                raise Exception("❌ 无法找到登录按钮")
+                page.get_screenshot(path='no_login_btn.jpg')
+                print(f"DEBUG HTML: {page.html[:200]}")
+                raise Exception("❌ 未找到登录按钮")
 
             print(">>> 跳转授权页...")
             time.sleep(5)
 
-            # ==================== 步骤 3: Discord 授权 ====================
+            # ==================== 步骤 3: 授权 ====================
             if "discord.com" in page.url:
                 print(">>> [3/7] 处理授权...")
-                handle_cloudflare(page)
+                wait_for_cloudflare_auto_solve(page)
                 
-                auth_selectors = [
-                    ('text', 'Authorize'),
-                    ('text', '授权'),
-                    ('css', 'button div:contains("Authorize")')
-                ]
-                auth_btn = find_element_robust(page, auth_selectors, timeout=8)
-                
+                auth_btn = find_element_robust(page, [('text', 'Authorize'), ('text', '授权')], timeout=8)
                 if auth_btn:
                     auth_btn.click()
-                    print(">>> 点击了授权按钮")
+                    print(">>> 点击授权")
                 else:
-                    print(">>> 未发现授权按钮（可能已自动授权），跳过...")
+                    print(">>> 未发现授权按钮，可能已跳过")
 
         else:
-            print(">>> ✅ 检测到已直接进入 Dashboard，跳过登录步骤！")
+            print(">>> ✅ 已直接进入 Dashboard")
 
         # ==================== 步骤 4: 确认进入后台 ====================
         print(">>> [4/7] 等待面板加载...")
@@ -179,58 +199,51 @@ def job():
             time.sleep(1)
         
         if not is_logged_in:
-             page.get_screenshot(path='login_failed_final.jpg')
-             raise Exception("❌ 登录流程结束，但 URL 仍停留在登录页")
+             page.get_screenshot(path='login_fail_final.jpg')
+             raise Exception("❌ 登录失败")
 
         # ==================== 步骤 5: 直达服务器 ====================
         target_url = "https://dashboard.katabump.com/servers/edit?id=197288"
-        print(f">>> [5/7] 进入服务器管理: {target_url}")
+        print(f">>> [5/7] 进入服务器: {target_url}")
         page.get(target_url, retry=3)
         page.wait.load_start()
         time.sleep(5)
-        handle_cloudflare(page)
-
-        # ==================== 步骤 6: 寻找续期入口 ====================
-        print(">>> [6/7] 寻找 Renew 按钮...")
-        renew_selectors = [
-            ('text', 'Renew'),
-            ('text', '续期'),
-            ('text', 'Extend'),
-            ('css', 'button:contains("Renew")')
-        ]
         
+        wait_for_cloudflare_auto_solve(page)
+
+        # ==================== 步骤 6: 续期 ====================
+        print(">>> [6/7] 寻找 Renew 按钮...")
+        renew_selectors = [('text', 'Renew'), ('text', '续期'), ('css', 'button:contains("Renew")')]
         main_renew = find_element_robust(page, renew_selectors, timeout=10)
         
         if main_renew:
             main_renew.click()
-            print(">>> ✅ 点击主 Renew 按钮，等待弹窗...")
+            print(">>> 点击 Renew...")
             time.sleep(3)
             
-            # ==================== 步骤 7: 弹窗终极验证 ====================
-            print(">>> [7/7] 处理弹窗验证...")
-            handle_cloudflare(page)
+            # ==================== 步骤 7: 弹窗 ====================
+            print(">>> [7/7] 处理弹窗...")
+            # 这里的盾也会被插件自动秒杀，我们只需要等
+            wait_for_cloudflare_auto_solve(page)
             
-            try:
-                modal = page.ele('css:.modal-content')
-                if modal:
-                    confirm_btn = find_element_robust(modal, [('text', 'Renew'), ('css', 'button.btn-primary')], timeout=5)
-                    if confirm_btn:
-                        confirm_btn.click()
-                        print("🎉🎉🎉 续期成功！任务完美结束！")
-                    else:
-                        print("❌ 弹窗已弹出，但找不到确认按钮")
+            modal = page.ele('css:.modal-content')
+            if modal:
+                confirm_btn = find_element_robust(modal, [('text', 'Renew'), ('css', 'button.btn-primary')], timeout=5)
+                if confirm_btn:
+                    confirm_btn.click()
+                    print("🎉🎉🎉 续期成功！")
                 else:
-                    print("❌ 找不到弹窗元素 (.modal-content)")
-            except Exception as e:
-                print(f"❌ 弹窗处理异常: {e}")
+                    print("❌ 弹窗里无按钮")
+            else:
+                print("❌ 无弹窗")
         else:
-            print("⚠️ 未找到 Renew 按钮 (可能已续期或布局变更)。")
-            page.get_screenshot(path='no_renew_btn.jpg')
+            print("⚠️ 未找到 Renew 按钮")
+            page.get_screenshot(path='no_renew.jpg')
 
     except Exception as e:
-        print(f"❌ 脚本崩溃: {e}")
+        print(f"❌ 错误: {e}")
         try:
-            page.get_screenshot(path='crash_report.jpg', full_page=True)
+            page.get_screenshot(path='crash.jpg', full_page=True)
         except:
             pass
         exit(1)

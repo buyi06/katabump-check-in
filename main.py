@@ -33,9 +33,7 @@ def download_and_extract_silk_extension():
     except: return None
 
 def wait_for_cloudflare(page, timeout=20):
-    """
-    等待并处理页面级的 Cloudflare
-    """
+    """全页盾检测"""
     print(f"--- [盾] 检查全页 Cloudflare ({timeout}s)... ---")
     start = time.time()
     while time.time() - start < timeout:
@@ -51,89 +49,97 @@ def wait_for_cloudflare(page, timeout=20):
 
 def solve_modal_captcha(modal):
     """
-    【新增】专门解决弹窗里的验证码
+    【核心优化】死磕弹窗里的验证码
     """
-    print(">>> [验证] 正在寻找弹窗内的 Captcha...")
-    # 在弹窗元素内部寻找 iframe
-    iframe = modal.ele('tag:iframe') 
-    # 或者更精确: modal.ele('@src^https://challenges.cloudflare.com')
+    print(">>> [验证] 正在扫描弹窗内的 Captcha (最多等 15 秒)...")
+    
+    iframe = None
+    # 循环等待 iframe 出现，防止加载慢找不到
+    for i in range(15):
+        iframe = modal.ele('tag:iframe')
+        # 或者更精确的特征
+        if not iframe:
+            iframe = modal.ele('@src^https://challenges.cloudflare.com')
+        
+        if iframe:
+            print(f">>> [验证] 第 {i+1} 秒发现了验证码 iframe！")
+            break
+        time.sleep(1)
     
     if iframe:
-        print(">>> [验证] 发现验证码 iframe，尝试点击...")
+        print(">>> [验证] 尝试点击验证码...")
         try:
-            # 点击 iframe 内部
+            time.sleep(1) # 再稳一下
             iframe.ele('tag:body').click(by_js=True)
-            # 点击后必须死等几秒，等它转圈圈变绿
-            print(">>> [验证] 已点击，等待验证生效 (5秒)...")
-            time.sleep(5)
+            
+            # 点击后必须死等，让它转圈变绿
+            print(">>> [验证] 已点击，正在等待验证通过 (8秒)...")
+            time.sleep(8) 
             return True
         except Exception as e:
             print(f"⚠️ 验证码点击异常: {e}")
     else:
-        print(">>> [验证] 弹窗内未发现 iframe，可能无验证码。")
+        print(">>> [验证] 超时未发现 iframe (可能已被插件自动解决，或真的没有)。")
     return False
 
 def robust_click(ele):
-    """多重保障点击逻辑"""
+    """多重保障点击"""
     try:
         ele.scroll.to_see()
         time.sleep(0.5)
         print(f">>> [动作] 点击按钮: {ele.text}")
         ele.click(by_js=True)
         return True
-    except Exception as e:
-        print(f"⚠️ JS点击失败，尝试普通点击...")
+    except:
         try:
             ele.wait.displayed(timeout=3)
             ele.click()
             return True
         except Exception as e2:
-            print(f"❌ 点击彻底失败: {e2}")
+            print(f"❌ 点击失败: {e2}")
             return False
 
-def capture_real_message(page):
-    """扫描页面真实反馈"""
-    print(">>> [6/5] 正在扫描页面真实反馈...")
+def check_result_with_retry(page):
+    """检测结果，返回 True(成功/未到期) 或 False(失败/被拦截)"""
+    print(">>> [检测] 正在分析页面回显...")
     start_time = time.time()
-    found_any_message = False
-
-    while time.time() - start_time < 10:
-        alerts = page.eles('css:div[class*="alert"]') # 抓取提示框
+    
+    while time.time() - start_time < 12: # 多看一会
+        alerts = page.eles('css:div[class*="alert"]')
         messages = []
-        
         for alert in alerts:
-            # 修复 DrissionPage 4.x 语法: 使用 .states.is_displayed
             if alert.states.is_displayed:
-                text = alert.text
-                messages.append(f"[提示框]: {text}")
+                messages.append(f"[提示框]: {alert.text}")
 
+        # 只要发现信息就打印
         if messages:
-            found_any_message = True
             print("\n" + "="*50)
             print("📢 【页面真实回显】:")
             for msg in messages:
                 print(f"   {msg}")
             print("="*50 + "\n")
             
-            full_msg_str = str(messages).lower()
+            full_msg = str(messages).lower()
             
-            # 成功抓取到验证码错误的提示，说明脚本之前的操作确实被拦截了
-            if "captcha" in full_msg_str or "验证码" in full_msg_str:
-                print("⚠️ 警告：因为验证码未通过被拦截，本次操作可能失败。")
-                return False
-
-            if "can't renew" in full_msg_str or "too early" in full_msg_str:
-                print("✅ 判定结果: 还没到时间 (脚本操作正确)")
-                return True
-            elif "success" in full_msg_str or "extended" in full_msg_str:
-                print("✅ 判定结果: 续期成功")
+            # 1. 失败情况：验证码被拦截
+            if "captcha" in full_msg or "验证码" in full_msg:
+                print("❌ 结果: 验证码未通过，被拦截！准备重试...")
+                return False 
+            
+            # 2. 成功情况：时间没到
+            if "can't renew" in full_msg or "too early" in full_msg:
+                print("✅ 结果: 还没到时间 (脚本操作正确)")
                 return True
             
+            # 3. 成功情况：续期成功
+            if "success" in full_msg or "extended" in full_msg:
+                print("✅ 结果: 续期成功")
+                return True
+                
         time.sleep(1)
     
-    if not found_any_message:
-        print("⚠️ 未捕捉到明显提示。")
-    return True
+    print("⚠️ 未捕捉到明确结果，认为本次尝试可能失败。")
+    return False
 
 def job():
     ext_path = download_and_extract_silk_extension()
@@ -148,7 +154,7 @@ def job():
     co.auto_port()
     
     page = ChromiumPage(co)
-    try: page.set.timeouts(15)
+    try: page.set.timeouts(20) # 全局超时放宽
     except: pass
 
     try:
@@ -157,8 +163,8 @@ def job():
         target_url = os.environ.get("KB_RENEW_URL")
         if not all([email, password, target_url]): raise Exception("缺少 Secrets 配置")
 
-        # ==================== 1. 登录 ====================
-        print(">>> [1/5] 前往登录页...")
+        # ==================== 1. 登录 (只做一次) ====================
+        print(">>> [Step 1] 前往登录页...")
         page.get('https://dashboard.katabump.com/auth/login', retry=3)
         wait_for_cloudflare(page)
         
@@ -168,68 +174,98 @@ def job():
             page.ele('css:input[name="password"]').input(password)
             time.sleep(1)
             page.ele('css:button[type="submit"]').click()
-            print(">>> 等待跳转...")
-            time.sleep(5)
+            print(">>> 等待跳转 (10s)...")
+            time.sleep(10) # 宽裕时间
             wait_for_cloudflare(page)
         
         if "login" in page.url: raise Exception("登录失败")
         print(">>> ✅ 登录成功！")
 
-        # ==================== 2. 直达服务器 ====================
-        print(f">>> [3/5] 进入服务器页面...")
-        page.get(target_url, retry=3)
-        page.wait.load_start()
-        wait_for_cloudflare(page)
-        time.sleep(3)
-
-        # ==================== 3. 点击主 Renew 按钮 ====================
-        print(">>> [4/5] 寻找主界面 Renew 按钮...")
-        renew_btn = page.ele('css:button:contains("Renew")') or \
-                    page.ele('xpath://button[contains(text(), "Renew")]') or \
-                    page.ele('text:Renew')
+        # ==================== 2. 核心任务循环 (重试 5 次) ====================
+        max_retries = 5
+        success = False
         
-        if renew_btn:
-            robust_click(renew_btn)
-            print(">>> 已点击主按钮，等待弹窗加载...")
-            time.sleep(5) # 必须等待弹窗完全加载，否则找不到里面的 iframe
-            
-            # ==================== 4. 处理弹窗 (重点) ====================
-            print(">>> [5/5] 处理续期弹窗...")
-            
-            modal = page.ele('css:.modal-content')
-            if modal:
-                print(">>> 检测到弹窗容器...")
+        for attempt in range(1, max_retries + 1):
+            print(f"\n🚀 [Step 2] 开始第 {attempt}/{max_retries} 次续期尝试...")
+            try:
+                # 刷新页面，重新开始流程
+                print(f">>> 正在进入服务器页面: {target_url}")
+                page.get(target_url, retry=3)
+                page.wait.load_start()
                 
-                # 【关键修正】在点击确认前，先处理弹窗里的验证码！
-                solve_modal_captcha(modal)
+                # 页面加载缓冲
+                print(">>> 页面加载中 (等待 8s)...")
+                wait_for_cloudflare(page)
+                time.sleep(8) 
+
+                # 寻找主 Renew 按钮
+                print(">>> 寻找主界面 Renew 按钮...")
+                renew_btn = page.ele('css:button:contains("Renew")') or \
+                            page.ele('xpath://button[contains(text(), "Renew")]') or \
+                            page.ele('text:Renew')
                 
-                # 寻找确认按钮
-                confirm_btn = modal.ele('css:button.btn-primary') or \
-                              modal.ele('css:button[type="submit"]') or \
-                              modal.ele('xpath:.//button[contains(text(), "Renew")]')
+                if not renew_btn:
+                    print("⚠️ 未找到主 Renew 按钮 (可能已续期)，检查页面提示...")
+                    if check_result_with_retry(page):
+                        success = True
+                        break
+                    continue # 没找到按钮也没成功提示，重试
+
+                # 点击主按钮
+                robust_click(renew_btn)
+                print(">>> 已点击主按钮，等待弹窗加载 (8s)...")
+                time.sleep(8) # 等弹窗完全出来
                 
-                if confirm_btn:
-                    if not confirm_btn.states.is_enabled:
-                         print("⚠️ 按钮是灰色的 (Disabled)，直接检查反馈...")
-                         capture_real_message(page)
-                    else:
+                # 处理弹窗
+                modal = page.ele('css:.modal-content')
+                if modal:
+                    print(">>> 检测到弹窗，处理验证码...")
+                    
+                    # 【关键】寻找并点击验证码
+                    solve_modal_captcha(modal)
+                    
+                    # 寻找确认按钮
+                    confirm_btn = modal.ele('css:button.btn-primary') or \
+                                  modal.ele('css:button[type="submit"]') or \
+                                  modal.ele('xpath:.//button[contains(text(), "Renew")]')
+                    
+                    if confirm_btn and confirm_btn.states.is_enabled:
                         print(">>> 准备点击最终确认按钮...")
-                        if robust_click(confirm_btn):
-                            print("🎉🎉🎉 指令已发送，等待服务器响应...")
-                            time.sleep(3) 
-                            capture_real_message(page)
+                        robust_click(confirm_btn)
+                        print(">>> 指令已发送，等待反馈 (5s)...")
+                        time.sleep(5)
+                        
+                        # 检查结果
+                        if check_result_with_retry(page):
+                            success = True
+                            break # 成功了！跳出循环
                         else:
-                             raise Exception("点击操作最终失败")
+                            print(f"⚠️ 第 {attempt} 次尝试未成功，稍后重试...")
+                    else:
+                        print("⚠️ 确认按钮不可用，检查页面反馈...")
+                        if check_result_with_retry(page):
+                            success = True
+                            break
                 else:
-                    print("❌ 弹窗内未找到可点击的按钮")
-            else:
-                print("❌ 未检测到弹窗元素 (.modal-content)")
+                    print("❌ 未检测到弹窗，刷新页面重试...")
+            
+            except Exception as e:
+                print(f"❌ 本次尝试发生异常: {e}")
+            
+            # 如果没成功，等待一段时间再重试
+            if not success and attempt < max_retries:
+                print("⏳ 等待 10 秒后进行下一次尝试...")
+                time.sleep(10)
+
+        # ==================== 3. 最终总结 ====================
+        if success:
+            print("\n🎉🎉🎉 最终结果: 任务成功完成！")
         else:
-            print("⚠️ 主界面未找到 Renew 按钮")
-            capture_real_message(page)
+            print("\n😭😭😭 最终结果: 5 次尝试全部失败。")
+            exit(1)
 
     except Exception as e:
-        print(f"❌ 运行出错: {e}")
+        print(f"❌ 脚本崩溃: {e}")
         exit(1)
     finally:
         page.quit()

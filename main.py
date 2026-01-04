@@ -4,19 +4,17 @@ import requests
 import zipfile
 import io
 import datetime
+import re
 from DrissionPage import ChromiumPage, ChromiumOptions
 
 # ==================== 基础工具 ====================
 def log(message):
-    """实时日志"""
     current_time = datetime.datetime.now().strftime("%H:%M:%S")
     print(f"[{current_time}] {message}", flush=True)
 
 def download_silk():
-    """下载插件"""
     extract_dir = "silk_ext"
     if os.path.exists(extract_dir): return os.path.abspath(extract_dir)
-    log(">>> [系统] 正在下载过盾插件...")
     try:
         url = "https://clients2.google.com/service/update2/crx?response=redirect&prodversion=122.0&acceptformat=crx2,crx3&x=id%3Dajhmfdgkijocedmfjonnpjfojldioehi%26uc"
         headers = {"User-Agent": "Mozilla/5.0"}
@@ -31,11 +29,10 @@ def download_silk():
 # ==================== 核心逻辑 ====================
 
 def pass_full_page_shield(page):
-    """处理全屏 Cloudflare (门神)"""
+    """处理全屏 Cloudflare"""
     for _ in range(3):
         if "just a moment" in page.title.lower():
             log("--- [门神] 正在通过全屏盾...")
-            # timeout=2 自带等待
             iframe = page.ele('css:iframe[src*="cloudflare"]', timeout=2)
             if iframe: 
                 iframe.ele('tag:body').click(by_js=True)
@@ -45,40 +42,55 @@ def pass_full_page_shield(page):
     return False
 
 def pass_modal_captcha(modal):
-    """
-    【修复版】处理弹窗内的 CF 盾
-    不再使用 wait.ele_displayed，改用 .ele(timeout=...)
-    """
-    log(">>> [弹窗] 正在扫描验证码 iframe...")
-    
-    # ⚠️ 修复点：直接用 ele 配合 timeout，这在所有版本都通用
-    # 尝试找 cloudflare 的 iframe，最多等 10 秒
-    iframe = modal.ele('css:iframe[src*="cloudflare"]', timeout=10)
-    
+    """处理弹窗内的盾"""
+    log(">>> [弹窗] 扫描验证码...")
+    iframe = modal.ele('css:iframe[src*="cloudflare"]', timeout=8)
     if not iframe:
-        # 备选：有时候是 widget
         iframe = modal.ele('css:iframe[title*="Widget"]', timeout=2)
 
     if iframe:
-        log(">>> [弹窗] 👁️ 发现验证码，点击...")
+        log(">>> [弹窗] 发现验证码，点击...")
         try:
             iframe.ele('tag:body').click(by_js=True)
-            log(">>> [弹窗] 👆 已点击，强制等待 5 秒 (变绿)...")
+            log(">>> [弹窗] 已点击，等待 5 秒...")
             time.sleep(5) 
-            return True
-        except: 
-            pass
+        except: pass
     else:
         log(">>> [弹窗] 未发现验证码 (可能无需验证)")
-    return False
 
-def check_result_status(page):
-    """检查结果"""
-    html = page.html.lower()
-    if "can't renew" in html or "too early" in html:
-        return "TOO_EARLY"
-    if "success" in html or "extended" in html:
+def analyze_page_alert(page):
+    """
+    【精准定位版】专门解析 .alert 提示框
+    """
+    log(">>> [系统] 正在读取页面提示框 (.alert)...")
+    
+    # 1. 查找红色警告框 (alert-danger)
+    danger_alert = page.ele('css:.alert.alert-danger')
+    if danger_alert and danger_alert.states.is_displayed:
+        text = danger_alert.text
+        log(f"⬇️ 捕获到红色提示: {text}")
+        
+        if "can't renew" in text.lower():
+            # 尝试提取天数
+            days = "未知"
+            match = re.search(r'\(in (\d+) day', text)
+            if match:
+                days = match.group(1)
+            
+            log(f"✅ [结果] 还没到时间 (还需等待 {days} 天)")
+            return "SUCCESS_TOO_EARLY"
+        else:
+            log("⚠️ [结果] 出现其他错误提示")
+            return "FAIL"
+
+    # 2. 查找绿色成功框 (alert-success)
+    success_alert = page.ele('css:.alert.alert-success')
+    if success_alert and success_alert.states.is_displayed:
+        text = success_alert.text
+        log(f"⬇️ 捕获到绿色提示: {text}")
+        log("🎉 [结果] 续期成功！")
         return "SUCCESS"
+
     return "UNKNOWN"
 
 # ==================== 主程序 ====================
@@ -105,78 +117,68 @@ def job():
         target_url = os.environ.get("KB_RENEW_URL")
         
         if not all([email, password, target_url]): 
-            log("❌ Secrets 配置缺失")
+            log("❌ 配置缺失")
             exit(1)
 
-        # ---------------- Step 1: 登录 ----------------
-        log(">>> [1/3] 前往登录页...")
+        # Step 1: 登录
+        log(">>> [1/3] 登录...")
         page.get('https://dashboard.katabump.com/auth/login')
         pass_full_page_shield(page)
 
         if page.ele('css:input[name="email"]'):
-            log(">>> 输入账号密码...")
             page.ele('css:input[name="email"]').input(email)
             page.ele('css:input[name="password"]').input(password)
             page.ele('css:button#submit').click()
             page.wait.url_change('login', exclude=True, timeout=20)
         
-        # ---------------- Step 2: 直达服务器页面 ----------------
-        log(">>> [2/3] 跳转至服务器续期页...")
+        # Step 2: 进页面
+        log(">>> [2/3] 进入服务器页面...")
         page.get(target_url)
         pass_full_page_shield(page)
         
-        # ---------------- Step 3: 寻找 Renew 按钮 ----------------
-        log(">>> 正在定位 Renew 按钮...")
-        
+        # Step 3: 操作
+        log(">>> [3/3] 寻找按钮...")
         renew_btn = None
         for _ in range(10):
-            # 使用您提供的精准 data 属性
             renew_btn = page.ele('css:button[data-bs-target="#renew-modal"]')
             if renew_btn and renew_btn.states.is_displayed: break
             time.sleep(1)
 
         if renew_btn:
-            log(">>> [动作] 点击主 Renew 按钮...")
+            log(">>> 点击 Renew 按钮...")
             renew_btn.click(by_js=True)
             
-            log(">>> 等待弹窗加载...")
-            # 这里也改用 ele(timeout=...) 防止报错
             modal = page.ele('css:.modal-content', timeout=10)
-            
             if modal:
-                # 1. 先处理弹窗里的盾 (已修复函数)
                 pass_modal_captcha(modal)
-                
-                # 2. 点击确认
                 confirm_btn = modal.ele('css:button[type="submit"].btn-primary')
                 
                 if confirm_btn:
-                    log(">>> [动作] 点击最终确认 (Confirm)...")
+                    log(">>> 点击 Confirm 确认...")
                     confirm_btn.click(by_js=True)
-                    
+                    log(">>> 等待服务器响应 (5s)...")
                     time.sleep(5)
-                    status = check_result_status(page)
-                    if status == "SUCCESS":
-                        log("🎉🎉🎉 续期成功！(Success)")
-                    else:
-                        log("⚠️ 未检测到成功字样，请检查截图。")
+                    
+                    # 🎯 【精准判定】
+                    # 这里会去抓所有的 alert-danger 和 alert-success
+                    result = analyze_page_alert(page)
+                    
+                    if result == "UNKNOWN":
+                        log("⚠️ 未捕获到明确提示框，尝试读取原文...")
+                        # 兜底：如果 alert 没抓到，打印所有 alert 类的文本
+                        alerts = page.eles('css:.alert')
+                        for a in alerts:
+                            if a.states.is_displayed: print(f"👉 页面提示: {a.text}")
                 else:
-                    log("❌ 弹窗里找不到 Submit 按钮")
-                    exit(1)
+                    log("❌ 找不到确认按钮")
             else:
-                log("❌ 弹窗未出现")
-                exit(1)
+                log("❌ 弹窗未出")
         else:
-            log("⚠️ 未找到 Renew 按钮，检查状态...")
-            status = check_result_status(page)
-            if status == "TOO_EARLY":
-                log("✅ [结果] 还没到时间 (Too Early)，无需操作。")
-            else:
-                log("❌ 页面异常：没按钮也没提示。")
-                exit(1)
+            log("⚠️ 未找到 Renew 按钮，检查是否已有提示...")
+            analyze_page_alert(page)
 
     except Exception as e:
-        log(f"❌ 运行异常: {e}")
+        log(f"❌ 异常: {e}")
         exit(1)
     finally:
         page.quit()
